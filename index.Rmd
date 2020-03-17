@@ -1,0 +1,183 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Clay Girdner"
+date: "3/16/2020"
+output: html_document
+---
+# Predicting Workout Effectiveness
+
+
+## Objective
+The goal of this analysis is to predict the manner in which a given exercise was performed by a select group of test subjects. 
+
+## Data
+Before we get too far, let's first load the libraries we will need.
+```{r libraries, message=FALSE}
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+Data for this project comes from the Human Activity Recognition dataset available here: http://groupware.les.inf.puc-rio.br/har. With the data downloaded, we can now read it into R.
+
+```{r raw_data}
+training <- read.csv("pml-training.csv", na.strings = c("#DIV/0!", "NA"))
+testing  <- read.csv("pml-testing.csv", na.strings = c("#DIV/0!", "NA"))
+
+dim(training)
+dim(testing)
+```
+
+The variable we are concerned with in this analysis is the *classe* variable which describes how the exercise in question was performed. Rows with a *classe* value of "A" indicate a properly performed excercise, while "B", "C", "D", and "E" represent different mistakes which occured during the exercise. 
+
+```{r classe}
+summary(training$classe)
+```
+
+If we want a machine learning model, we first need to train/test it on a subset of our training data. In this case we will split it 70/30 training to test data.
+
+```{r split_clean}
+# partition the training dataset 
+set.seed(123)
+inTrain  <- createDataPartition(training$classe, p=0.7, list=FALSE)
+trainSub <- training[inTrain, ]
+testSub  <- training[-inTrain, ]
+
+dim(trainSub)
+dim(testSub)
+```
+
+Now we need to do a little data processing/cleaning before we can proceed. First, we will remove the initial seven columns of data, as these just represent ID fields such as name and time. Then we will look for variables with nearly zero variance (NZV), and drop these columns. Lastly, we will scan for columns with a large percentage of NA values and remove them.
+
+```{r clean1}
+# remove ID data fields (first 7 columns)
+trainSub <- trainSub[, -c(1:7)]
+testSub  <- testSub[, -c(1:7)]
+
+# remove variables with nearly zero variance (NZV)
+NZV <- nearZeroVar(trainSub)
+trainSub <- trainSub[, -NZV]
+testSub  <- testSub[, -NZV]
+
+# remove variables with more than 75% NA values (NAs)
+# (47 of the variables are 98% NA values)
+NAs <- sapply(trainSub, function(x) mean(is.na(x))) > 0.75
+trainSub <- trainSub[, NAs == FALSE]
+testSub  <- testSub[, NAs == FALSE]
+
+dim(trainSub)
+dim(testSub)
+```
+
+
+# Model Testing and Selection
+With our data now clean, we can now start training some models. We chose to compare two different forms of ensemble models - random forest (rf) and gradient boosting machine (gbm). We also chose to perform cross validation while building these models as it helps reduce error (both in and out of sample). In this case, we opted for 5 fold validation. The last piece we should mention is the inclustion of parallel processing which greatly helped to speed up the model training process.
+
+```{r models, results = "hide"}
+# configure parallel processing
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+# standard 5-fold cross validation (CV)
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+# train random forest model on trainSub data
+fit_rf <- train(classe ~ ., data = trainSub, method="rf",
+                trControl = fitControl, verbose = FALSE)
+
+# train gradient boosting model on trainSub data
+fit_gbm <- train(classe ~ ., data = trainSub, method="gbm",
+                trControl = fitControl, verbose = FALSE)
+
+# de-register parallel processing cluster
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+```{r predictions}
+# model predictions
+pred_rf <- predict(fit_rf, newdata = testSub)
+pred_gbm <- predict(fit_gbm, newdata = testSub)
+```
+
+```{r rf_accuracy, echo = TRUE}
+confusionMatrix(testSub$classe, pred_rf)$overall[1]
+```
+
+```{r gbm_accuracy, echo = TRUE}
+confusionMatrix(testSub$classe, pred_gbm)$overall[1]
+```
+
+Although both methods seem to provide impressive results (rf accuracy = 99%, gbm accuracy = 96%), the random forest model wins in this matchup and will be used for the remainder of this analysis.
+
+We know that the random forest model was accurate, but now let's take a look at some its other attributes.
+
+```{r fit_rf}
+fit_rf
+```
+
+If in-sample accuracy = 0.9914103, then the in-sample error rate = 0.0085897 (1 - accuracy). Now let's look at out-of-sample error.
+
+```{r confustion}
+confusionMatrix(testSub$classe, pred_rf)
+```
+
+If you're smart, you probably already knew what the out-of-sample error was by using the accuracy value listed above when we were comparing rf and gbm. We obtain the out-of-sample error rate by taking the accuracy when predicting on the test data (0.9937) and subtracting it from one. This gives us a error value of 0.0063, which is actually less than the in-sample error rate, indicating this is a pretty strong model.
+
+
+# Final Model
+The next move is to retrain our random forest model on the entirety of the training data (more data is better than less data). However, before we can do this we need to reclean the training data as we did in the inital training phase.
+
+```{r clean2}
+# remove ID data fields (first 7 columns)
+training <- training[, -c(1:7)]
+testing  <- testing[, -c(1:7)]
+
+# remove variables with nearly zero variance (NZV)
+NZV <- nearZeroVar(training)
+training <- training[, -NZV]
+testing  <- testing[, -NZV]
+
+# remove variables with more than 75% NA values (NAs)
+# (47 of the variables are 98% NA values)
+NAs <- sapply(training, function(x) mean(is.na(x))) > 0.75
+training <- training[, NAs == FALSE]
+testing  <- testing[, NAs == FALSE]
+
+dim(training)
+dim(testing)
+```
+
+With the data properly cleaned, we can now fit the random forest model on the training data in the same manner we did before.
+
+```{r refit}
+# configure parallel processing
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+# train random forest model on training data
+fit_final <- train(classe ~ ., data = training, method="rf",
+                   trControl = fitControl, verbose = FALSE)
+
+# de-register parallel processing cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+fit_final
+```
+
+```{r var_imp}
+var_imp <- varImp(fit_final, scale = FALSE)
+var_imp
+plot(var_imp)
+```
+
+Again, we see very good accuracy (>99%), which is encouraging. I've also included a plot displaying the importance of each variable. It appears that movement around the belt area is highly important when predicting quality of this particular exercise as three of the top five variables are related to the belt measurement.
+
+The last step in this analysis is to predict the 20 testing observations using final random forest model. Results are below.
+
+```{r final}
+final_preds <- predict(fit_final, newdata = testing)
+final_preds
+```
+
